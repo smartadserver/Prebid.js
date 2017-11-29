@@ -1,93 +1,93 @@
 import * as utils from 'src/utils';
-import {config} from 'src/config';
-import {registerBidder} from 'src/adapters/bidderFactory';
+import {
+  config
+} from 'src/config';
+import {
+  registerBidder
+} from 'src/adapters/bidderFactory';
 const BIDDER_CODE = 'smartadserver';
 export const spec = {
-        code: BIDDER_CODE,
-        aliases: ['smart'], // short code
-        /**
-         * Determines whether or not the given bid request is valid.
-         *
-         * @param {BidRequest} bid The bid params to validate.
-         * @return boolean True if this is a valid bid, and false otherwise.
-         */
-        isBidRequestValid: function(bid) {
-            return !!(bid.params.siteId && bid.params.pageId && bid.params.formatId && bid.params.domain);
-        },
-        /**
-         * Make a server request from the list of BidRequests.
-         *
-         * @param {validBidRequests[]} - an array of bids
-         * @return ServerRequest Info describing the request to the server.
-         */
-        buildRequests: function(validBidRequests) {
-            // use bidderRequest.bids[] to get bidder-dependent request info
+  code: BIDDER_CODE,
+  aliases: ['smart'], // short code
+  /**
+   * Determines whether or not the given bid request is valid.
+   *
+   * @param {BidRequest} bid The bid params to validate.
+   * @return boolean True if this is a valid bid, and false otherwise.
+   */
+  isBidRequestValid: function (bid) {
+    return !!(bid.params && bid.params.siteId && bid.params.pageId && bid.params.formatId && bid.params.domain);
+  },
+  /**
+   * Make a server request from the list of BidRequests.
+   *
+   * @param {validBidRequests[]} - an array of bids
+   * @return ServerRequest Info describing the request to the server.
+   */
+  buildRequests: function (validBidRequests) {
+    // use bidderRequest.bids[] to get bidder-dependent request info
 
-            // if your bidder supports multiple currencies, use config.getConfig(currency)
-            // to find which one the ad server needs
+    // if your bidder supports multiple currencies, use config.getConfig(currency)
+    // to find which one the ad server needs
 
-            // pull requested transaction ID from bidderRequest.bids[].transactionId
-            var bid = validBidRequests[0];
-            const payload = {
-                siteid: bid.params.siteId,
-                pageid: bid.params.pageId,
-                formatid: bid.params.formatId,
-                dealId: bid.params.dealId || '',
-                currencyCode: config.getConfig('currency'),
-                bidfloor: bid.params.bidfloor || 0.0,
-                targeting: bid.params.target || '',
-                tagId: bid.adUnitCode,
-                sizes: bid.sizes.map(size => new { w: size[0], h: size[1]}),
-                pageDomain: utils.getTopWindowUrl(),
-                transactionId: bid.transactionId
-            };
-            const payloadString = JSON.stringify(payload);
-            return {
-                method: 'POST',
-                url: bid.params.domain + "/prebid/v1",
-                data: payloadString,
-            };
-        },
-        /**
-         * Unpack the response from the server into a list of bids.
-         *
-         * @param {*} serverResponse A successful response from the server.
-         * @return {Bid[]} An array of bids which were nested inside the server.
-         */
-        interpretResponse: function(serverResponse, bidRequest) {
-            const bidResponses = [];
-            // loop through serverResponses {
-            const bidResponse = {
-                requestId: bidRequest.bidId,
-                bidderCode: spec.code,
-                cpm: serverResponse.cpm,
-                width: serverResponse.width,
-                height: serverResponse.height,
-                creativeId: serverResponse.creativeId,
-                dealId: serverResponse.dealId,
-                currency: serverResponse.currency,
-                netRevenue: serverResponse.isNetCpm,
-                ttl: serverResponse.ttl,
-                referrer: utils.getTopWindowUrl(),
-                ad: serverResponse.ad
-            };
-            bidResponses.push(bidResponse);
-        //}
-        return bidResponses;
-    },
-    getUserSyncs: function(syncOptions) {
-        if (syncOptions.iframeEnabled) {
-            return [{
-                type: 'iframe',
-                url: 'ADAPTER_SYNC_URL'
-            }];
-        }
-        if (syncOptions.pixelEnabled) {
-            return [{
-                type: 'iframe',
-                url: 'ADAPTER_SYNC_URL'
-            }];
-        }
+    // pull requested transaction ID from bidderRequest.bids[].transactionId
+    if (!Array.isArray(validBidRequests)) {
+      validBidRequests = [validBidRequests];
     }
+    var bid = validBidRequests[0];
+    const payload = {
+      siteid: bid.params.siteId,
+      pageid: bid.params.pageId,
+      formatid: bid.params.formatId,
+      currencyCode: config.getConfig('currency'),
+      bidfloor: bid.params.bidfloor || 0.0,
+      targeting: bid.params.target && bid.params.target != '' ? bid.params.target : undefined,
+      tagId: bid.adUnitCode,
+      sizes: bid.sizes.map(size => ({
+        w: size[0],
+        h: size[1]
+      })),
+      pageDomain: utils.getTopWindowUrl(),
+      transactionId: bid.transactionId,
+      timeout: config.getConfig('bidderTimeout')
+    };
+    const payloadString = JSON.stringify(payload);
+    return {
+      method: 'POST',
+      url: bid.params.domain + '/prebid/v1',
+      data: payloadString,
+    };
+  },
+  /**
+   * Unpack the response from the server into a list of bids.
+   *
+   * @param {*} serverResponse A successful response from the server.
+   * @return {Bid[]} An array of bids which were nested inside the server.
+   */
+  interpretResponse: function (serverResponse, bidRequest) {
+    const bidResponses = [];
+    if (serverResponse) {
+      const bidResponse = {
+        requestId: bidRequest.bidId,
+        bidderCode: spec.code,
+        cpm: serverResponse.cpm,
+        width: serverResponse.width,
+        height: serverResponse.height,
+        creativeId: serverResponse.creativeId,
+        dealId: serverResponse.dealId,
+        currency: serverResponse.currency,
+        netRevenue: serverResponse.isNetCpm,
+        ttl: serverResponse.ttl,
+        referrer: utils.getTopWindowUrl(),
+        ad: serverResponse.ad
+      };
+      bidResponses.push(bidResponse);
+    }
+    return bidResponses;
+  },
+  getUserSyncs: function (syncOptions) {
+    // iframe || image
+    return undefined;
+  }
 }
 registerBidder(spec);
