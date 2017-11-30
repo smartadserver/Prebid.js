@@ -1,7 +1,7 @@
 /** @module adaptermanger */
 
 import { flatten, getBidderCodes, getDefinedParams, shuffle } from './utils';
-import { mapSizes } from './sizeMapping';
+import { resolveStatus } from './sizeMapping';
 import { processNativeAdUnitParams, nativeAdapters } from './native';
 import { newBidder } from './adapters/bidderFactory';
 import { ajaxBuilder } from 'src/ajax';
@@ -10,76 +10,112 @@ import { config, RANDOM } from 'src/config';
 var utils = require('./utils.js');
 var CONSTANTS = require('./constants.json');
 var events = require('./events');
+let s2sTestingModule; // store s2sTesting module if it's loaded
 
 var _bidderRegistry = {};
 exports.bidderRegistry = _bidderRegistry;
 
-let _s2sConfig = config.getConfig('s2sConfig');
+let _s2sConfig = {};
+config.getConfig('s2sConfig', config => {
+  _s2sConfig = config.s2sConfig;
+});
 
 var _analyticsRegistry = {};
 
-function getBids({bidderCode, auctionId, bidderRequestId, adUnits}) {
-  return adUnits.map(adUnit => {
-    return adUnit.bids.filter(bid => bid.bidder === bidderCode)
-      .map(bid => {
-        let sizes = adUnit.sizes;
-        if (adUnit.sizeMapping) {
-          let sizeMapping = mapSizes(adUnit);
-          if (sizeMapping === '') {
-            return '';
+/**
+ * @typedef {object} LabelDescriptor
+ * @property {boolean} labelAll describes whether or not this object expects all labels to match, or any label to match
+ * @property {Array<string>} labels the labels listed on the bidder or adUnit
+ * @property {Array<string>} activeLabels the labels specified as being active by requestBids
+ */
+
+/**
+ * Returns object describing the status of labels on the adUnit or bidder along with labels passed into requestBids
+ * @param bidOrAdUnit the bidder or adUnit to get label info on
+ * @param activeLabels the labels passed to requestBids
+ * @returns {LabelDescriptor}
+ */
+function getLabels(bidOrAdUnit, activeLabels) {
+  if (bidOrAdUnit.labelAll) {
+    return {labelAll: true, labels: bidOrAdUnit.labelAll, activeLabels};
+  }
+  return {labelAll: false, labels: bidOrAdUnit.labelAny, activeLabels};
+}
+
+function getBids({bidderCode, auctionId, bidderRequestId, adUnits, labels}) {
+  return adUnits.reduce((result, adUnit) => {
+    let {active, sizes: filteredAdUnitSizes} = resolveStatus(getLabels(adUnit, labels), adUnit.sizes);
+
+    if (active) {
+      result.push(adUnit.bids.filter(bid => bid.bidder === bidderCode)
+        .reduce((bids, bid) => {
+          if (adUnit.mediaTypes) {
+            if (utils.isValidMediaTypes(adUnit.mediaTypes)) {
+              bid = Object.assign({}, bid, {mediaTypes: adUnit.mediaTypes});
+            } else {
+              utils.logError(
+                `mediaTypes is not correctly configured for adunit ${adUnit.code}`
+              );
+            }
           }
-          sizes = sizeMapping;
-        }
 
-        if (adUnit.mediaTypes) {
-          if (utils.isValidMediaTypes(adUnit.mediaTypes)) {
-            bid = Object.assign({}, bid, { mediaTypes: adUnit.mediaTypes });
-          } else {
-            utils.logError(
-              `mediaTypes is not correctly configured for adunit ${adUnit.code}`
-            );
+          const nativeParams =
+            adUnit.nativeParams || utils.deepAccess(adUnit, 'mediaTypes.native');
+          if (nativeParams) {
+            bid = Object.assign({}, bid, {
+              nativeParams: processNativeAdUnitParams(nativeParams),
+            });
           }
-        }
 
-        const nativeParams =
-          adUnit.nativeParams || utils.deepAccess(adUnit, 'mediaTypes.native');
-        if (nativeParams) {
-          bid = Object.assign({}, bid, {
-            nativeParams: processNativeAdUnitParams(nativeParams),
-          });
-        }
+          bid = Object.assign({}, bid, getDefinedParams(adUnit, [
+            'mediaType',
+            'renderer'
+          ]));
 
-        bid = Object.assign({}, bid, getDefinedParams(adUnit, [
-          'mediaType',
-          'renderer'
-        ]));
+          let {active, sizes} = resolveStatus(getLabels(bid, labels), filteredAdUnitSizes);
 
-        return Object.assign({}, bid, {
-          adUnitCode: adUnit.code,
-          transactionId: adUnit.transactionId,
-          sizes: sizes,
-          bidId: bid.bid_id || utils.getUniqueIdentifierStr(),
-          bidderRequestId,
-          auctionId
-        });
-      }
+          if (active) {
+            bids.push(Object.assign({}, bid, {
+              adUnitCode: adUnit.code,
+              transactionId: adUnit.transactionId,
+              sizes: sizes,
+              bidId: bid.bid_id || utils.getUniqueIdentifierStr(),
+              bidderRequestId,
+              auctionId
+            }));
+          }
+          return bids;
+        }, [])
       );
-  }).reduce(flatten, []).filter(val => val !== '');
+    }
+    return result;
+  }, []).reduce(flatten, []).filter(val => val !== '');
+}
+
+function transformHeightWidth(adUnit) {
+  let sizesObj = [];
+  let sizes = utils.parseSizesInput(adUnit.sizes);
+  sizes.forEach(size => {
+    let heightWidth = size.split('x');
+    let sizeObj = {
+      'w': parseInt(heightWidth[0]),
+      'h': parseInt(heightWidth[1])
+    };
+    sizesObj.push(sizeObj);
+  });
+  return sizesObj;
 }
 
 function getAdUnitCopyForPrebidServer(adUnits) {
   let adaptersServerSide = _s2sConfig.bidders;
   let adUnitsCopy = utils.cloneJson(adUnits);
 
-  // filter out client side bids
   adUnitsCopy.forEach((adUnit) => {
-    if (adUnit.sizeMapping) {
-      adUnit.sizes = mapSizes(adUnit);
-      delete adUnit.sizeMapping;
-    }
     adUnit.sizes = transformHeightWidth(adUnit);
+
+    // filter out client side bids
     adUnit.bids = adUnit.bids.filter((bid) => {
-      return adaptersServerSide.includes(bid.bidder);
+      return adaptersServerSide.includes(bid.bidder) && (!doingS2STesting() || bid.finalSource !== s2sTestingModule.CLIENT);
     }).map((bid) => {
       bid.bid_id = utils.getUniqueIdentifierStr();
       return bid;
@@ -93,29 +129,48 @@ function getAdUnitCopyForPrebidServer(adUnits) {
   return adUnitsCopy;
 }
 
-exports.makeBidRequests = function(adUnits, auctionStart, auctionId, cbTimeout) {
+function getAdUnitCopyForClientAdapters(adUnits) {
+  let adUnitsClientCopy = utils.cloneJson(adUnits);
+  // filter out s2s bids
+  adUnitsClientCopy.forEach((adUnit) => {
+    adUnit.bids = adUnit.bids.filter((bid) => {
+      return !doingS2STesting() || bid.finalSource !== s2sTestingModule.SERVER;
+    })
+  });
+
+  // don't send empty requests
+  adUnitsClientCopy = adUnitsClientCopy.filter(adUnit => {
+    return adUnit.bids.length !== 0;
+  });
+
+  return adUnitsClientCopy;
+}
+
+exports.makeBidRequests = function(adUnits, auctionStart, auctionId, cbTimeout, labels) {
   let bidRequests = [];
   let bidderCodes = getBidderCodes(adUnits);
   if (config.getConfig('bidderSequence') === RANDOM) {
     bidderCodes = shuffle(bidderCodes);
   }
 
-  const s2sAdapter = _bidderRegistry[_s2sConfig.adapter];
-  if (s2sAdapter) {
-    s2sAdapter.setConfig(_s2sConfig);
-    s2sAdapter.queueSync({bidderCodes});
-  }
-
+  let clientBidderCodes = bidderCodes;
+  let clientTestAdapters = [];
   if (_s2sConfig.enabled) {
+    // if s2sConfig.bidderControl testing is turned on
+    if (doingS2STesting()) {
+      // get all adapters doing client testing
+      clientTestAdapters = s2sTestingModule.getSourceBidderMap(adUnits)[s2sTestingModule.CLIENT];
+    }
+
     // these are called on the s2s adapter
     let adaptersServerSide = _s2sConfig.bidders;
 
-    // don't call these client side
-    bidderCodes = bidderCodes.filter((elm) => {
-      return !adaptersServerSide.includes(elm);
+    // don't call these client side (unless client request is needed for testing)
+    clientBidderCodes = bidderCodes.filter((elm) => {
+      return !adaptersServerSide.includes(elm) || clientTestAdapters.includes(elm);
     });
-    let adUnitsCopy = getAdUnitCopyForPrebidServer(adUnits);
 
+    let adUnitsS2SCopy = getAdUnitCopyForPrebidServer(adUnits);
     let tid = utils.generateUUID();
     adaptersServerSide.forEach(bidderCode => {
       const bidderRequestId = utils.getUniqueIdentifierStr();
@@ -124,7 +179,7 @@ exports.makeBidRequests = function(adUnits, auctionStart, auctionId, cbTimeout) 
         auctionId,
         bidderRequestId,
         tid,
-        bids: getBids({bidderCode, auctionId, bidderRequestId, 'adUnits': adUnitsCopy}),
+        bids: getBids({bidderCode, auctionId, bidderRequestId, 'adUnits': adUnitsS2SCopy, labels}),
         auctionStart: auctionStart,
         timeout: _s2sConfig.timeout,
         src: CONSTANTS.S2S.SRC
@@ -135,13 +190,15 @@ exports.makeBidRequests = function(adUnits, auctionStart, auctionId, cbTimeout) 
     });
   }
 
-  bidderCodes.forEach(bidderCode => {
+  // client adapters
+  let adUnitsClientCopy = getAdUnitCopyForClientAdapters(adUnits);
+  clientBidderCodes.forEach(bidderCode => {
     const bidderRequestId = utils.getUniqueIdentifierStr();
     const bidderRequest = {
       bidderCode,
       auctionId,
       bidderRequestId,
-      bids: getBids({bidderCode, auctionId, bidderRequestId, adUnits}),
+      bids: getBids({bidderCode, auctionId, bidderRequestId, 'adUnits': adUnitsClientCopy, labels}),
       auctionStart: auctionStart,
       timeout: cbTimeout
     };
@@ -150,12 +207,20 @@ exports.makeBidRequests = function(adUnits, auctionStart, auctionId, cbTimeout) 
     }
   });
   return bidRequests;
-}
+};
 
 exports.callBids = (adUnits, bidRequests, addBidResponse, doneCb) => {
-  let serverBidRequests = bidRequests.filter(bidRequest => {
-    return bidRequest.src && bidRequest.src === CONSTANTS.S2S.SRC;
-  });
+  if (!bidRequests.length) {
+    utils.logWarn('callBids executed with no bidRequests.  Were they filtered by labels or sizing?');
+    return;
+  }
+
+  let ajax = ajaxBuilder(bidRequests[0].timeout);
+
+  let [clientBidRequests, serverBidRequests] = bidRequests.reduce((partitions, bidRequest) => {
+    partitions[Number(typeof bidRequest.src !== 'undefined' && bidRequest.src === CONSTANTS.S2S.SRC)].push(bidRequest);
+    return partitions;
+  }, [[], []]);
 
   if (serverBidRequests.length) {
     let adaptersServerSide = _s2sConfig.bidders;
@@ -164,14 +229,39 @@ exports.callBids = (adUnits, bidRequests, addBidResponse, doneCb) => {
 
     if (s2sAdapter) {
       let s2sBidRequest = {tid, 'ad_units': getAdUnitCopyForPrebidServer(adUnits)};
-      utils.logMessage(`CALLING S2S HEADER BIDDERS ==== ${adaptersServerSide.join(',')}`);
       if (s2sBidRequest.ad_units.length) {
-        s2sAdapter.callBids(s2sBidRequest);
+        let doneCbs = serverBidRequests.map(bidRequest => {
+          bidRequest.doneCbCallCount = 0;
+          return doneCb(bidRequest.bidderRequestId)
+        });
+
+        // only log adapters that actually have adUnit bids
+        let allBidders = s2sBidRequest.ad_units.reduce((adapters, adUnit) => {
+          return adapters.concat((adUnit.bids || []).reduce((adapters, bid) => { return adapters.concat(bid.bidderCode) }, []));
+        }, []);
+        utils.logMessage(`CALLING S2S HEADER BIDDERS ==== ${adaptersServerSide.filter(adapter => {
+          return allBidders.includes(adapter);
+        }).join(',')}`);
+
+        // fire BID_REQUESTED event for each s2s bidRequest
+        serverBidRequests.forEach(bidRequest => {
+          events.emit(CONSTANTS.EVENTS.BID_REQUESTED, bidRequest);
+        });
+
+        // make bid requests
+        s2sAdapter.callBids(
+          s2sBidRequest,
+          serverBidRequests,
+          addBidResponse,
+          () => doneCbs.forEach(done => done()),
+          ajax
+        );
       }
     }
   }
-  let ajax = ajaxBuilder(bidRequests[0].timeout);
-  bidRequests.forEach(bidRequest => {
+
+  // handle client adapter requests
+  clientBidRequests.forEach(bidRequest => {
     bidRequest.start = new Date().getTime();
     // TODO : Do we check for bid in pool from here and skip calling adapter again ?
     const adapter = _bidderRegistry[bidRequest.bidderCode];
@@ -187,18 +277,8 @@ exports.callBids = (adUnits, bidRequests, addBidResponse, doneCb) => {
   });
 }
 
-function transformHeightWidth(adUnit) {
-  let sizesObj = [];
-  let sizes = utils.parseSizesInput(adUnit.sizes);
-  sizes.forEach(size => {
-    let heightWidth = size.split('x');
-    let sizeObj = {
-      'w': parseInt(heightWidth[0]),
-      'h': parseInt(heightWidth[1])
-    };
-    sizesObj.push(sizeObj);
-  });
-  return sizesObj;
+function doingS2STesting() {
+  return _s2sConfig && _s2sConfig.enabled && _s2sConfig.testing && s2sTestingModule;
 }
 
 function getSupportedMediaTypes(bidderCode) {
@@ -289,4 +369,14 @@ exports.enableAnalytics = function (config) {
         ${adapterConfig.provider}.`);
     }
   });
+};
+
+exports.getBidAdapter = function(bidder) {
+  return _bidderRegistry[bidder];
+};
+
+// the s2sTesting module is injected when it's loaded rather than being imported
+// importing it causes the packager to include it even when it's not explicitly included in the build
+exports.setS2STestingModule = function (module) {
+  s2sTestingModule = module;
 };

@@ -4,8 +4,10 @@
  */
 
 import events from './events';
-import { fireNativeImpressions } from './native';
+import { fireNativeTrackers } from './native';
 import { EVENTS } from './constants';
+import { isSlotMatchingAdUnitCode } from './utils';
+import { auctionManager } from './auctionManager';
 
 const BID_WON = EVENTS.BID_WON;
 
@@ -23,7 +25,7 @@ function receiveMessage(ev) {
   }
 
   if (data.adId) {
-    const adObject = $$PREBID_GLOBAL$$._bidsReceived.find(function (bid) {
+    const adObject = auctionManager.getBidsReceived().find(function (bid) {
       return bid.adId === data.adId;
     });
 
@@ -31,7 +33,7 @@ function receiveMessage(ev) {
       sendAdToCreative(adObject, data.adServerDomain, ev.source);
 
       // save winning bids
-      $$PREBID_GLOBAL$$._winningBids.push(adObject);
+      auctionManager.addWinningBid(adObject);
 
       events.emit(BID_WON, adObject);
     }
@@ -42,8 +44,8 @@ function receiveMessage(ev) {
     //   adId: '%%PATTERN:hb_adid%%'
     // }), '*');
     if (data.message === 'Prebid Native') {
-      fireNativeImpressions(adObject);
-      $$PREBID_GLOBAL$$._winningBids.push(adObject);
+      fireNativeTrackers(data, adObject);
+      auctionManager.addWinningBid(adObject);
       events.emit(BID_WON, adObject);
     }
   }
@@ -66,11 +68,11 @@ function sendAdToCreative(adObject, remoteDomain, source) {
 }
 
 function resizeRemoteCreative({ adUnitCode, width, height }) {
-  const iframe = document.getElementById(window.googletag.pubads()
-    .getSlots().find(slot => {
-      return slot.getAdUnitPath() === adUnitCode ||
-        slot.getSlotElementId() === adUnitCode;
-    }).getSlotElementId()).querySelector('iframe');
+  const iframe = document.getElementById(
+    window.googletag.pubads().getSlots()
+      .filter(isSlotMatchingAdUnitCode(adUnitCode))
+      .find(slot => slot)
+      .getSlotElementId()).querySelector('iframe');
 
   iframe.width = '' + width;
   iframe.height = '' + height;

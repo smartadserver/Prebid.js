@@ -14,7 +14,7 @@ const DEFAULT_DEBUG = false;
 const DEFAULT_BIDDER_TIMEOUT = 3000;
 const DEFAULT_PUBLISHER_DOMAIN = window.location.origin;
 const DEFAULT_COOKIESYNC_DELAY = 100;
-const DEFAULT_ENABLE_SEND_ALL_BIDS = false;
+const DEFAULT_ENABLE_SEND_ALL_BIDS = true;
 const DEFAULT_USERSYNC = {
   syncEnabled: true,
   pixelEnabled: true,
@@ -22,16 +22,6 @@ const DEFAULT_USERSYNC = {
   syncDelay: 3000
 };
 const DEFAULT_TIMEOUTBUFFER = 200;
-const DEFAULT_S2SCONFIG = {
-  enabled: false,
-  endpoint: 'https://prebid.adnxs.com/pbs/v1/auction',
-  timeout: 1000,
-  maxBids: 1,
-  adapter: 'prebidServer',
-  syncEndpoint: 'https://prebid.adnxs.com/pbs/v1/cookie_sync',
-  cookieSet: true,
-  bidders: []
-};
 
 export const RANDOM = 'random';
 const FIXED = 'fixed';
@@ -43,12 +33,12 @@ VALID_ORDERS[FIXED] = true;
 const DEFAULT_BIDDER_SEQUENCE = RANDOM;
 
 const GRANULARITY_OPTIONS = {
-  'LOW': 'low',
-  'MEDIUM': 'medium',
-  'HIGH': 'high',
-  'AUTO': 'auto',
-  'DENSE': 'dense',
-  'CUSTOM': 'custom'
+  LOW: 'low',
+  MEDIUM: 'medium',
+  HIGH: 'high',
+  AUTO: 'auto',
+  DENSE: 'dense',
+  CUSTOM: 'custom'
 };
 
 const ALL_TOPICS = '*';
@@ -63,6 +53,8 @@ const ALL_TOPICS = '*';
 
 export function newConfig() {
   let listeners = [];
+
+  let defaults = {};
 
   let config = {
     // `debug` is equivalent to legacy `pbjs.logging` property
@@ -152,24 +144,6 @@ export function newConfig() {
       this._timoutBuffer = val;
     },
 
-    _s2sConfig: DEFAULT_S2SCONFIG,
-    get s2sConfig() {
-      return this._s2sConfig;
-    },
-    set s2sConfig(val) {
-      if (!utils.contains(Object.keys(val), 'accountId')) {
-        utils.logError('accountId missing in Server to Server config');
-        return;
-      }
-
-      if (!utils.contains(Object.keys(val), 'bidders')) {
-        utils.logError('bidders missing in Server to Server config');
-        return;
-      }
-
-      this._s2sConfig = Object.assign({}, DEFAULT_S2SCONFIG, val);
-    },
-
     // userSync defaults
     userSync: DEFAULT_USERSYNC
   };
@@ -220,10 +194,36 @@ export function newConfig() {
   function setConfig(options) {
     if (typeof options !== 'object') {
       utils.logError('setConfig options must be an object');
+      return;
     }
 
-    Object.assign(config, options);
-    callSubscribers(options);
+    let topics = Object.keys(options);
+    let topicalConfig = {};
+
+    topics.forEach(topic => {
+      let option = options[topic];
+
+      if (typeof defaults[topic] === 'object' && typeof option === 'object') {
+        option = Object.assign({}, defaults[topic], option);
+      }
+
+      topicalConfig[topic] = config[topic] = option;
+    });
+
+    callSubscribers(topicalConfig);
+  }
+
+  /**
+   * Sets configuration defaults which setConfig values can be applied on top of
+   * @param {object} options
+   */
+  function setDefaults(options) {
+    if (typeof defaults !== 'object') {
+      utils.logError('defaults must be an object');
+      return;
+    }
+
+    Object.assign(defaults, options);
   }
 
   /*
@@ -291,7 +291,8 @@ export function newConfig() {
 
   return {
     getConfig,
-    setConfig
+    setConfig,
+    setDefaults
   };
 }
 
