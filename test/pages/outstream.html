@@ -23,34 +23,17 @@
 				}
 			},
 			bids: [{
-				bidder: 'appnexus',
+				bidder: "smart",
 				params: {
-					placementId: 13232385,
-					video: {
-						skippable: true,
-						playback_method: ['auto_play_sound_off']
-					}
+					domain: 'https://ww251.smartadserver.com',
+					siteId: 207435,
+					pageId: 896536,
+					formatId: 85089,
+					bidfloor: 5
 				}
 			}]
-		}, {
-			code: 'video_ad_unit_2',
-			mediaTypes: {
-				video: {
-					context: 'outstream',
-					playerSize: [640, 480]
-				}
-			},
-			bids: [{
-				bidder: 'appnexus',
-				params: {
-					placementId: 13232385,
-					video: {
-						skippable: true,
-						playback_method: ['auto_play_sound_off']
-					}
-				}
-			}]
-		}];
+		}
+    ];
 
 		// Load the pbjs global and Prebid event queue
 		var pbjs = pbjs || {};
@@ -77,7 +60,7 @@
 
 		googletag.cmd.push(function () {
 			googletag
-				.defineSlot('/19968336/prebid_outstream_adunit_1', [[1, 1]], 'video_ad_unit_1')
+				.defineSlot('/19968336/header-bid-tag-0', [[300, 250]], 'video_ad_unit_1')
 				.addService(googletag.pubads());
 			googletag.pubads().disableInitialLoad();
 			googletag.pubads().enableSingleRequest();
