@@ -1,15 +1,23 @@
-import {attachIdSystem, init, requestBidsHook, setSubmoduleRegistry, syncDelay} from 'modules/userId/index.js';
+import {
+  attachIdSystem,
+  auctionDelay,
+  init,
+  requestBidsHook,
+  setSubmoduleRegistry,
+  syncDelay
+} from 'modules/userId/index.js';
 import {config} from 'src/config';
 import * as utils from 'src/utils';
+import events from 'src/events';
+import CONSTANTS from 'src/constants.json';
 import {unifiedIdSubmodule} from 'modules/userId/unifiedIdSystem';
 import {pubCommonIdSubmodule} from 'modules/userId/pubCommonIdSystem';
 import {id5IdSubmodule} from 'modules/id5IdSystem';
 import {identityLinkSubmodule} from 'modules/identityLinkIdSystem';
+import {liveIntentIdSubmodule} from 'modules/liveIntentIdSystem';
 
 let assert = require('chai').assert;
 let expect = require('chai').expect;
-let events = require('src/events');
-let constants = require('src/constants.json');
 const EXPIRED_COOKIE_DATE = 'Thu, 01 Jan 1970 00:00:01 GMT';
 
 describe('User ID', function() {
@@ -298,8 +306,8 @@ describe('User ID', function() {
       expect(utils.logInfo.args[0][0]).to.exist.and.to.equal('User ID - usersync config updated for 1 submodules');
     });
 
-    it('config with 4 configurations should result in 4 submodules add', function () {
-      setSubmoduleRegistry([pubCommonIdSubmodule, unifiedIdSubmodule, id5IdSubmodule, identityLinkSubmodule]);
+    it('config with 5 configurations should result in 5 submodules add', function () {
+      setSubmoduleRegistry([pubCommonIdSubmodule, unifiedIdSubmodule, id5IdSubmodule, identityLinkSubmodule, liveIntentIdSubmodule]);
       init(config);
       config.setConfig({
         usersync: {
@@ -315,10 +323,13 @@ describe('User ID', function() {
           }, {
             name: 'identityLink',
             storage: { name: 'idl_env', type: 'cookie' }
+          }, {
+            name: 'liveIntentId',
+            storage: { name: '_li_pbid', type: 'cookie' }
           }]
         }
       });
-      expect(utils.logInfo.args[0][0]).to.exist.and.to.equal('User ID - usersync config updated for 4 submodules');
+      expect(utils.logInfo.args[0][0]).to.exist.and.to.equal('User ID - usersync config updated for 5 submodules');
     });
 
     it('config syncDelay updates module correctly', function () {
@@ -334,6 +345,247 @@ describe('User ID', function() {
         }
       });
       expect(syncDelay).to.equal(99);
+    });
+
+    it('config auctionDelay updates module correctly', function () {
+      setSubmoduleRegistry([pubCommonIdSubmodule, unifiedIdSubmodule, id5IdSubmodule, identityLinkSubmodule]);
+      init(config);
+      config.setConfig({
+        usersync: {
+          auctionDelay: 100,
+          userIds: [{
+            name: 'unifiedId',
+            storage: { name: 'unifiedid', type: 'cookie' }
+          }]
+        }
+      });
+      expect(auctionDelay).to.equal(100);
+    });
+
+    it('config auctionDelay defaults to 0 if not a number', function () {
+      setSubmoduleRegistry([pubCommonIdSubmodule, unifiedIdSubmodule, id5IdSubmodule, identityLinkSubmodule]);
+      init(config);
+      config.setConfig({
+        usersync: {
+          auctionDelay: '',
+          userIds: [{
+            name: 'unifiedId',
+            storage: { name: 'unifiedid', type: 'cookie' }
+          }]
+        }
+      });
+      expect(auctionDelay).to.equal(0);
+    });
+  });
+
+  describe('auction and user sync delays', function() {
+    let sandbox;
+    let adUnits;
+    let mockIdCallback;
+    let auctionSpy;
+
+    before(function() {
+      sandbox = sinon.createSandbox();
+      sandbox.stub(global, 'setTimeout');
+      sandbox.stub(events, 'on');
+    });
+
+    beforeEach(function() {
+      // remove cookie
+      utils.setCookie('MOCKID', '', EXPIRED_COOKIE_DATE);
+
+      adUnits = [getAdUnitMock()];
+
+      auctionSpy = sandbox.spy();
+      mockIdCallback = sandbox.stub();
+      const mockIdSystem = {
+        name: 'mockId',
+        decode: function(value) {
+          return {
+            'mid': value['MOCKID']
+          };
+        },
+        getId: function() {
+          const storedId = utils.getCookie('MOCKID');
+          if (storedId) {
+            return {id: {'MOCKID': storedId}};
+          }
+          return {callback: mockIdCallback};
+        }
+      };
+
+      init(config);
+
+      attachIdSystem(mockIdSystem, true);
+    });
+
+    afterEach(function () {
+      $$PREBID_GLOBAL$$.requestBids.removeAll();
+      config.resetConfig();
+      sandbox.resetHistory();
+    });
+
+    after(function() {
+      sandbox.restore();
+    });
+
+    it('delays auction if auctionDelay is set, timing out at auction delay', function() {
+      config.setConfig({
+        usersync: {
+          auctionDelay: 33,
+          syncDelay: 77,
+          userIds: [{
+            name: 'mockId', storage: { name: 'MOCKID', type: 'cookie' }
+          }]
+        }
+      });
+
+      requestBidsHook(auctionSpy, {adUnits});
+
+      // check auction was delayed
+      global.setTimeout.calledOnce.should.equal(true);
+      global.setTimeout.calledWith(sinon.match.func, 33);
+      auctionSpy.calledOnce.should.equal(false);
+
+      // check ids were fetched
+      mockIdCallback.calledOnce.should.equal(true);
+
+      // callback to continue auction if timed out
+      global.setTimeout.callArg(0);
+      auctionSpy.calledOnce.should.equal(true);
+
+      // does not call auction again once ids are synced
+      mockIdCallback.callArgWith(0, {'MOCKID': '1234'});
+      auctionSpy.calledOnce.should.equal(true);
+
+      // no sync after auction ends
+      events.on.called.should.equal(false);
+    });
+
+    it('delays auction if auctionDelay is set, continuing auction if ids are fetched before timing out', function(done) {
+      config.setConfig({
+        usersync: {
+          auctionDelay: 33,
+          syncDelay: 77,
+          userIds: [{
+            name: 'mockId', storage: { name: 'MOCKID', type: 'cookie' }
+          }]
+        }
+      });
+
+      requestBidsHook(auctionSpy, {adUnits});
+
+      // check auction was delayed
+      global.setTimeout.calledOnce.should.equal(true);
+      global.setTimeout.calledWith(sinon.match.func, 33);
+      auctionSpy.calledOnce.should.equal(false);
+
+      // check ids were fetched
+      mockIdCallback.calledOnce.should.equal(true);
+
+      // if ids returned, should continue auction
+      mockIdCallback.callArgWith(0, {'MOCKID': '1234'});
+      auctionSpy.calledOnce.should.equal(true);
+
+      // check ids were copied to bids
+      adUnits.forEach(unit => {
+        unit.bids.forEach(bid => {
+          expect(bid).to.have.deep.nested.property('userId.mid');
+          expect(bid.userId.mid).to.equal('1234');
+        });
+        done();
+      });
+
+      // no sync after auction ends
+      events.on.called.should.equal(false);
+    });
+
+    it('does not delay auction if not set, delays id fetch after auction ends with syncDelay', function() {
+      config.setConfig({
+        usersync: {
+          syncDelay: 77,
+          userIds: [{
+            name: 'mockId', storage: { name: 'MOCKID', type: 'cookie' }
+          }]
+        }
+      });
+
+      // check config has been set correctly
+      expect(auctionDelay).to.equal(0);
+      expect(syncDelay).to.equal(77);
+
+      requestBidsHook(auctionSpy, {adUnits});
+
+      // should not delay auction
+      global.setTimeout.calledOnce.should.equal(false);
+      auctionSpy.calledOnce.should.equal(true);
+
+      // check user sync is delayed after auction is ended
+      mockIdCallback.calledOnce.should.equal(false);
+      events.on.calledOnce.should.equal(true);
+      events.on.calledWith(CONSTANTS.EVENTS.AUCTION_END, sinon.match.func);
+
+      // once auction is ended, sync user ids after delay
+      events.on.callArg(1);
+      global.setTimeout.calledOnce.should.equal(true);
+      global.setTimeout.calledWith(sinon.match.func, 77);
+      mockIdCallback.calledOnce.should.equal(false);
+
+      // once sync delay is over, ids should be fetched
+      global.setTimeout.callArg(0);
+      mockIdCallback.calledOnce.should.equal(true);
+    });
+
+    it('does not delay user id sync after auction ends if set to 0', function() {
+      config.setConfig({
+        usersync: {
+          syncDelay: 0,
+          userIds: [{
+            name: 'mockId', storage: { name: 'MOCKID', type: 'cookie' }
+          }]
+        }
+      });
+
+      expect(syncDelay).to.equal(0);
+
+      requestBidsHook(auctionSpy, {adUnits});
+
+      // auction should not be delayed
+      global.setTimeout.calledOnce.should.equal(false);
+      auctionSpy.calledOnce.should.equal(true);
+
+      // sync delay after auction is ended
+      mockIdCallback.calledOnce.should.equal(false);
+      events.on.calledOnce.should.equal(true);
+      events.on.calledWith(CONSTANTS.EVENTS.AUCTION_END, sinon.match.func);
+
+      // once auction is ended, if no sync delay, fetch ids
+      events.on.callArg(1);
+      global.setTimeout.calledOnce.should.equal(false);
+      mockIdCallback.calledOnce.should.equal(true);
+    });
+
+    it('does not delay auction if there are no ids to fetch', function() {
+      utils.setCookie('MOCKID', JSON.stringify({'MOCKID': '123456778'}), new Date(Date.now() + 5000).toUTCString());
+
+      config.setConfig({
+        usersync: {
+          auctionDelay: 33,
+          syncDelay: 77,
+          userIds: [{
+            name: 'mockId', storage: { name: 'MOCKID', type: 'cookie' }
+          }]
+        }
+      });
+
+      requestBidsHook(auctionSpy, {adUnits});
+
+      global.setTimeout.calledOnce.should.equal(false);
+      auctionSpy.calledOnce.should.equal(true);
+      mockIdCallback.calledOnce.should.equal(false);
+
+      // no sync after auction ends
+      events.on.called.should.equal(false);
     });
   });
 
@@ -441,6 +693,46 @@ describe('User ID', function() {
       }, {adUnits});
     });
 
+    it('test hook from liveIntentId html5', function(done) {
+      // simulate existing browser local storage values
+      localStorage.setItem('_li_pbid', JSON.stringify({'unifiedId': 'random-ls-identifier'}));
+      localStorage.setItem('_li_pbid_exp', '');
+
+      setSubmoduleRegistry([liveIntentIdSubmodule]);
+      init(config);
+      config.setConfig(getConfigMock(['liveIntentId', '_li_pbid', 'html5']));
+      requestBidsHook(function() {
+        adUnits.forEach(unit => {
+          unit.bids.forEach(bid => {
+            expect(bid).to.have.deep.nested.property('userId.lipb');
+            expect(bid.userId.lipb.lipbid).to.equal('random-ls-identifier');
+          });
+        });
+        localStorage.removeItem('_li_pbid');
+        localStorage.removeItem('_li_pbid_exp');
+        done();
+      }, {adUnits});
+    });
+
+    it('test hook from liveIntentId cookie', function(done) {
+      utils.setCookie('_li_pbid', JSON.stringify({'unifiedId': 'random-cookie-identifier'}), (new Date(Date.now() + 100000).toUTCString()));
+
+      setSubmoduleRegistry([liveIntentIdSubmodule]);
+      init(config);
+      config.setConfig(getConfigMock(['liveIntentId', '_li_pbid', 'cookie']));
+
+      requestBidsHook(function() {
+        adUnits.forEach(unit => {
+          unit.bids.forEach(bid => {
+            expect(bid).to.have.deep.nested.property('userId.lipb');
+            expect(bid.userId.lipb.lipbid).to.equal('random-cookie-identifier');
+          });
+        });
+        utils.setCookie('_li_pbid', '', EXPIRED_COOKIE_DATE);
+        done();
+      }, {adUnits});
+    });
+
     it('test hook from id5id cookies when refresh needed', function(done) {
       // simulate existing browser local storage values
       utils.setCookie('id5id', JSON.stringify({'ID5ID': 'testid5id'}), (new Date(Date.now() + 5000).toUTCString()));
@@ -478,6 +770,48 @@ describe('User ID', function() {
             expect(bid.userId.id5id).to.equal('testid5id');
           });
         });
+        done();
+      }, {adUnits});
+    });
+
+    it('test hook from liveIntentId html5', function(done) {
+      // simulate existing browser local storage values
+      localStorage.setItem('_li_pbid', JSON.stringify({'unifiedId': 'random-ls-identifier', 'segments': ['123']}));
+      localStorage.setItem('_li_pbid_exp', '');
+
+      setSubmoduleRegistry([liveIntentIdSubmodule]);
+      init(config);
+      config.setConfig(getConfigMock(['liveIntentId', '_li_pbid', 'html5']));
+      requestBidsHook(function() {
+        adUnits.forEach(unit => {
+          unit.bids.forEach(bid => {
+            expect(bid).to.have.deep.nested.property('userId.lipb');
+            expect(bid.userId.lipb.lipbid).to.equal('random-ls-identifier');
+            expect(bid.userId.lipb.segments).to.include('123');
+          });
+        });
+        localStorage.removeItem('_li_pbid');
+        localStorage.removeItem('_li_pbid_exp');
+        done();
+      }, {adUnits});
+    });
+
+    it('test hook from liveIntentId cookie', function(done) {
+      utils.setCookie('_li_pbid', JSON.stringify({'unifiedId': 'random-cookie-identifier', 'segments': ['123']}), (new Date(Date.now() + 100000).toUTCString()));
+
+      setSubmoduleRegistry([liveIntentIdSubmodule]);
+      init(config);
+      config.setConfig(getConfigMock(['liveIntentId', '_li_pbid', 'cookie']));
+
+      requestBidsHook(function() {
+        adUnits.forEach(unit => {
+          unit.bids.forEach(bid => {
+            expect(bid).to.have.deep.nested.property('userId.lipb');
+            expect(bid.userId.lipb.lipbid).to.equal('random-cookie-identifier');
+            expect(bid.userId.lipb.segments).to.include('123');
+          });
+        });
+        utils.setCookie('_li_pbid', '', EXPIRED_COOKIE_DATE);
         done();
       }, {adUnits});
     });
@@ -673,7 +1007,7 @@ describe('User ID', function() {
       requestBidsHook((config) => { innerAdUnits = config.adUnits }, {adUnits});
 
       expect(utils.triggerPixel.called).to.be.false;
-      events.emit(constants.EVENTS.AUCTION_END, {});
+      events.emit(CONSTANTS.EVENTS.AUCTION_END, {});
       expect(utils.triggerPixel.getCall(0).args[0]).to.include('/any/pubcid/url');
     });
 
@@ -689,7 +1023,7 @@ describe('User ID', function() {
       requestBidsHook((config) => { innerAdUnits = config.adUnits }, {adUnits});
 
       expect(requests).to.be.empty;
-      events.emit(constants.EVENTS.AUCTION_END, {});
+      events.emit(CONSTANTS.EVENTS.AUCTION_END, {});
       expect(requests[0].url).to.equal('/any/unifiedid/url');
     });
 
@@ -705,7 +1039,7 @@ describe('User ID', function() {
       requestBidsHook((config) => { innerAdUnits = config.adUnits }, {adUnits});
 
       expect(requests).to.be.empty;
-      events.emit(constants.EVENTS.AUCTION_END, {});
+      events.emit(CONSTANTS.EVENTS.AUCTION_END, {});
       expect(requests[0].url).to.equal('//match.adsrvr.org/track/rid?ttd_pid=rubicon&fmt=json');
     });
   });

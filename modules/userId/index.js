@@ -71,6 +71,8 @@
  * @property {(boolean|undefined)} create - create id if missing.  default is true.
  * @property {(boolean|undefined)} extend - extend expiration time on each access.  default is false.
  * @property {(string|undefined)} pid - placement id url param value
+ * @property {(string|undefined)} publisherId - the unique identifier of the publisher in question
+ * @property {(array|undefined)} identifiersToResolve - the identifiers from either ls|cookie to be attached to the getId query
  */
 
 /**
@@ -109,6 +111,7 @@ const MODULE_NAME = 'User ID';
 const COOKIE = 'cookie';
 const LOCAL_STORAGE = 'html5';
 const DEFAULT_SYNC_DELAY = 500;
+const NO_AUCTION_DELAY = 0;
 
 /** @type {string[]} */
 let validStorageTypes = [];
@@ -130,6 +133,9 @@ let submoduleRegistry = [];
 
 /** @type {(number|undefined)} */
 export let syncDelay;
+
+/** @type {(number|undefined)} */
+export let auctionDelay;
 
 /** @param {Submodule[]} submodules */
 export function setSubmoduleRegistry(submodules) {
@@ -212,8 +218,10 @@ function hasGDPRConsent(consentData) {
 
 /**
  * @param {SubmoduleContainer[]} submodules
+ * @param {function} cb - callback for after processing is done.
  */
-function processSubmoduleCallbacks(submodules) {
+function processSubmoduleCallbacks(submodules, cb) {
+  const done = cb ? utils.delayExecution(cb, submodules.length) : function() { };
   submodules.forEach(function(submodule) {
     submodule.callback(function callbackCompleted(idObj) {
       // if valid, id data should be saved to cookie/html storage
@@ -226,6 +234,7 @@ function processSubmoduleCallbacks(submodules) {
       } else {
         utils.logError(`${MODULE_NAME}: ${submodule.submodule.name} - request id responded with an empty value`);
       }
+      done();
     });
 
     // clear callback, this prop is used to test if all submodule callbacks are complete below
@@ -273,7 +282,9 @@ function addIdDataToAdUnitBids(adUnits, submodules) {
 /**
  * This is a common function that will initalize subModules if not already done and it will also execute subModule callbacks
  */
-function initializeSubmodulesAndExecuteCallbacks() {
+function initializeSubmodulesAndExecuteCallbacks(continueAuction) {
+  let delayed = false;
+
   // initialize submodules only when undefined
   if (typeof initializedSubmodules === 'undefined') {
     initializedSubmodules = initSubmodules(submodules, gdprDataHandler.getConsentData());
@@ -282,21 +293,41 @@ function initializeSubmodulesAndExecuteCallbacks() {
       const submodulesWithCallbacks = initializedSubmodules.filter(item => utils.isFn(item.callback));
 
       if (submodulesWithCallbacks.length) {
-        // wait for auction complete before processing submodule callbacks
-        events.on(CONSTANTS.EVENTS.AUCTION_END, function auctionEndHandler() {
-          events.off(CONSTANTS.EVENTS.AUCTION_END, auctionEndHandler);
-
-          // when syncDelay is zero, process callbacks now, otherwise delay process with a setTimeout
-          if (syncDelay > 0) {
-            setTimeout(function() {
-              processSubmoduleCallbacks(submodulesWithCallbacks);
-            }, syncDelay);
-          } else {
-            processSubmoduleCallbacks(submodulesWithCallbacks);
+        if (continueAuction && auctionDelay > 0) {
+          // delay auction until ids are available
+          delayed = true;
+          let continued = false;
+          const continueCallback = function() {
+            if (!continued) {
+              continued = true;
+              continueAuction();
+            }
           }
-        });
+          utils.logInfo(`${MODULE_NAME} - auction delayed by ${auctionDelay} at most to fetch ids`);
+          processSubmoduleCallbacks(submodulesWithCallbacks, continueCallback);
+
+          setTimeout(continueCallback, auctionDelay);
+        } else {
+          // wait for auction complete before processing submodule callbacks
+          events.on(CONSTANTS.EVENTS.AUCTION_END, function auctionEndHandler() {
+            events.off(CONSTANTS.EVENTS.AUCTION_END, auctionEndHandler);
+
+            // when syncDelay is zero, process callbacks now, otherwise delay process with a setTimeout
+            if (syncDelay > 0) {
+              setTimeout(function() {
+                processSubmoduleCallbacks(submodulesWithCallbacks);
+              }, syncDelay);
+            } else {
+              processSubmoduleCallbacks(submodulesWithCallbacks);
+            }
+          });
+        }
       }
     }
+  }
+
+  if (continueAuction && !delayed) {
+    continueAuction();
   }
 }
 
@@ -311,11 +342,12 @@ function initializeSubmodulesAndExecuteCallbacks() {
  */
 export function requestBidsHook(fn, reqBidsConfigObj) {
   // initialize submodules only when undefined
-  initializeSubmodulesAndExecuteCallbacks();
-  // pass available user id data to bid adapters
-  addIdDataToAdUnitBids(reqBidsConfigObj.adUnits || getGlobal().adUnits, initializedSubmodules);
-  // calling fn allows prebid to continue processing
-  return fn.call(this, reqBidsConfigObj);
+  initializeSubmodulesAndExecuteCallbacks(function() {
+    // pass available user id data to bid adapters
+    addIdDataToAdUnitBids(reqBidsConfigObj.adUnits || getGlobal().adUnits, initializedSubmodules);
+    // calling fn allows prebid to continue processing
+    fn.call(this, reqBidsConfigObj);
+  });
 }
 
 /**
@@ -339,6 +371,7 @@ function initSubmodules(submodules, consentData) {
     utils.logWarn(`${MODULE_NAME} - gdpr permission not valid for local storage or cookies, exit module`);
     return [];
   }
+
   return submodules.reduce((carry, submodule) => {
     // There are two submodule configuration types to handle: storage or value
     // 1. storage: retrieve user id data from cookie/html storage or with the submodule's getId method
@@ -502,6 +535,7 @@ export function init(config) {
     if (userSync && userSync.userIds) {
       configRegistry = userSync.userIds;
       syncDelay = utils.isNumber(userSync.syncDelay) ? userSync.syncDelay : DEFAULT_SYNC_DELAY;
+      auctionDelay = utils.isNumber(userSync.auctionDelay) ? userSync.auctionDelay : NO_AUCTION_DELAY;
       updateSubmodules();
     }
   });
