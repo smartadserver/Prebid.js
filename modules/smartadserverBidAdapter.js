@@ -132,7 +132,7 @@ export const spec = {
     const bidResponses = [];
     let response = serverResponse.body;
     try {
-      if (response) {
+      if (response && !response.isNoAd) {
         const bidRequest = JSON.parse(bidRequestString.data);
 
         let bidResponse = {
