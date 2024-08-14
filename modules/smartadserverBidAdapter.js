@@ -1,7 +1,8 @@
-import { deepAccess, deepClone, isArrayOfNums, isFn, isInteger, isPlainObject, logError } from '../src/utils.js';
+import { deepAccess, deepClone, deepSetValue, isArrayOfNums, isFn, isInteger, isPlainObject, logError } from '../src/utils.js';
 import { BANNER, VIDEO } from '../src/mediaTypes.js';
 import { config } from '../src/config.js';
 import { registerBidder } from '../src/adapters/bidderFactory.js';
+import { ortbConverter } from '../libraries/ortbConverter/converter.js'
 
 /**
  * @typedef {import('../src/adapters/bidderFactory.js').BidRequest} BidRequest
@@ -12,6 +13,18 @@ import { registerBidder } from '../src/adapters/bidderFactory.js';
 const BIDDER_CODE = 'smartadserver';
 const GVL_ID = 45;
 const DEFAULT_FLOOR = 0.0;
+
+const converter = ortbConverter({
+  context: {
+    netRevenue: true,
+    ttl: 30
+  },
+  imp(buildImp, bidRequest, context) {
+    const imp = buildImp(bidRequest, context)
+    deepSetValue(imp, 'ext.params', bidRequest.params)
+    return imp
+  }
+});
 
 export const spec = {
   code: BIDDER_CODE,
@@ -170,6 +183,13 @@ export const spec = {
    * @return {ServerRequest[]} Info describing the request to the server.
    */
   buildRequests: function (validBidRequests, bidderRequest) {
+    const data = converter.toORTB({ bidRequests: validBidRequests, bidderRequest })
+    return [{
+      method: 'POST',
+      url: 'https://prg.smartadserver.com/prebid/v1',
+      data
+    }]
+
     // use bidderRequest.bids[] to get bidder-dependent request info
     const adServerCurrency = config.getConfig('currency.adServerCurrency');
     const sellerDefinedAudience = deepAccess(bidderRequest, 'ortb2.user.data', config.getAnyConfig('ortb2.user.data'));
@@ -268,6 +288,9 @@ export const spec = {
    * @return {Bid[]} An array of bids which were nested inside the server.
    */
   interpretResponse: function (serverResponse, bidRequestString) {
+    const bids = converter.fromORTB({response: serverResponse.body, request: bidRequestString.data}).bids
+    return bids
+
     const bidResponses = [];
     let response = serverResponse.body;
     try {
