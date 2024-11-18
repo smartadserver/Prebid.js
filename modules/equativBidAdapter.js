@@ -55,7 +55,12 @@ export const spec = {
       deepAccess(bidRequest, 'params.networkId') ||
       deepAccess(bidRequest, 'ortb2.site.publisher.id') ||
       deepAccess(bidRequest, 'ortb2.app.publisher.id') ||
-      deepAccess(bidRequest, 'ortb2.dooh.publisher.id')
+      deepAccess(bidRequest, 'ortb2.dooh.publisher.id') ||
+      (
+        deepAccess(bidRequest, 'params.siteId') &&
+        deepAccess(bidRequest, 'params.pageId') &&
+        deepAccess(bidRequest, 'params.formatId')
+      )
     );
   },
 

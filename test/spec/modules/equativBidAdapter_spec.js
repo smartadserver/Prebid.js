@@ -532,5 +532,23 @@ describe('Equativ bid adapter tests', () => {
       const bidRequest = {};
       expect(spec.isBidRequestValid(bidRequest)).to.equal(false);
     });
+
+    it('should return true if siteId, pageId and formatId are set, even if networkId is not present', () => {
+      // ASSEMBLE
+      const EXPECTED_VALIDITY = true;
+      const bidRequest = {
+        params: {
+          siteId: 111,
+          pageId: 222,
+          formatId: 333
+        }
+      }
+
+      // ACT
+      const ACTUAL_VALIDITY = spec.isBidRequestValid(bidRequest)
+
+      // ASSERT
+      expect(EXPECTED_VALIDITY).to.equal(ACTUAL_VALIDITY);
+    });    
   });
 });
