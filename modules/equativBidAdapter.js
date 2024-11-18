@@ -134,13 +134,18 @@ export const converter = ortbConverter({
     let env = ['ortb2.site.publisher', 'ortb2.app.publisher', 'ortb2.dooh.publisher'].find(propPath => deepAccess(bid, propPath)) || 'ortb2.site.publisher';
     deepSetValue(req, env.replace('ortb2.', '') + '.id', deepAccess(bid, env + '.id') || bid.params.networkId);
 
-    if (deepAccess(bid, 'mediaTypes.video')) {
-      ['mimes', 'placement'].forEach(prop => {
-        if (!bid.mediaTypes.video[prop]) {
-          logWarn(`${LOG_PREFIX} Property "${prop}" is missing from request`, bid);
-        }
-      });
-    }
+    [
+      { path: 'mediaTypes.video', props: ['mimes', 'placement'] },
+      { path: 'ortb2Imp.audio', props: ['mimes'] }
+    ].forEach(({ path, props }) => {
+      if (deepAccess(bid, path)) {
+        props.forEach(prop => {
+          if (!deepAccess(bid, `${path}.${prop}`)) {
+            logWarn(`${LOG_PREFIX} Property "${path}.${prop}" is missing from request`, bid);
+          }
+        });
+      }
+    });
 
     const pid = storage.getCookie(PID_COOKIE_NAME);
     if (pid) {

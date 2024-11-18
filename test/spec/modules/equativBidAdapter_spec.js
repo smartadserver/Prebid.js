@@ -472,8 +472,8 @@ describe('Equativ bid adapter tests', () => {
 
       // ASSERT
       expect(utils.logWarn.callCount).to.equal(2);
-      expect(utils.logWarn.getCall(0).args[0]).to.satisfy(arg => arg.includes('"mimes" is missing'));
-      expect(utils.logWarn.getCall(1).args[0]).to.satisfy(arg => arg.includes('"placement" is missing'));
+      expect(utils.logWarn.getCall(0).args[0]).to.satisfy(arg => arg.includes('"mediaTypes.video.mimes" is missing'));
+      expect(utils.logWarn.getCall(1).args[0]).to.satisfy(arg => arg.includes('"mediaTypes.video.placement" is missing'));
     });
 
     it('should not send a video request when it has an empty body and no other impressions with any media types are defined', () => {
