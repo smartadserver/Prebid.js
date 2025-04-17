@@ -17,51 +17,10 @@ const COOKIE_SYNC_URL = `${COOKIE_SYNC_ORIGIN}/diff/templates/asset/csync.html`;
 const LOG_PREFIX = 'Equativ:';
 const PID_STORAGE_NAME = 'eqt_pid';
 
+let feedbackArray = [];
+let impIdMap = {};
 let nwid = 0;
-
-let impIdMap = {};
-
-/**
- * Assigns values to new properties, removes temporary ones from an object
- * and remove temporary default bidfloor of -1
- * @param {*} obj An object
- * @param {string} key A name of the new property
- * @param {string} tempKey A name of the temporary property to be removed
- * @returns {*} An updated object
- */
-function cleanObject(obj, key, tempKey) {
-  const newObj = {};
-
-  for (const prop in obj) {
-    if (prop === key) {
-      if (Object.prototype.hasOwnProperty.call(obj, tempKey)) {
-        newObj[key] = obj[tempKey];
-      }
-    } else if (prop !== tempKey) {
-      newObj[prop] = obj[prop];
-    }
-  }
-
-  newObj.bidfloor === -1 && delete newObj.bidfloor;
-
-  return newObj;
-}
-
-/**
- * Returns a floor price provided by the Price Floors module or the floor price set in the publisher parameters
- * @param {*} bid
- * @param {string} mediaType A media type
- * @param {number} width A width of the ad
- * @param {number} height A height of the ad
- * @param {string} currency A floor price currency
- * @returns {number} Floor price
- */
-function getFloor(bid, mediaType, width, height, currency) {
-  return bid.getFloor?.({ currency, mediaType, size: [width, height] })
-    .floor || bid.params.bidfloor || -1;
-}
-
-let impIdMap = {};
+let tokens = {};
 
 /**
  * Assigns values to new properties, removes temporary ones from an object
@@ -102,6 +61,14 @@ function getFloor(bid, mediaType, width, height, currency) {
   return bid.getFloor?.({ currency, mediaType, size: [width, height] })
     .floor || bid.params.bidfloor || -1;
 }
+
+/**
+ * Gets value of the local variable impIdMap
+ * @returns {*} Value of impIdMap
+ */
+export function getImpIdMap() {
+  return impIdMap;
+};
 
 /**
  * Evaluates impressions for validity.  The entry evaluated is considered valid if NEITHER of these conditions are met:
@@ -131,6 +98,36 @@ function makeId() {
   return str;
 }
 
+/**
+ * Updates bid request with data from previous auction
+ * @param {*} req A bid request object to be updated
+ * @returns {*} Updated bid request object
+ */
+function updateFeedbackData(req) {
+  if (req?.ext?.prebid?.previousauctioninfo) {
+    req.ext.prebid.previousauctioninfo.forEach(info => {
+      if (tokens[info?.bidId]) {
+        feedbackArray.push({
+          feedback_token: tokens[info.bidId],
+          loss: info.bidderCpm == info.highestBidCpm ? 0 : 102,
+          price: info.highestBidCpm
+        });
+
+        delete tokens[info.bidId];
+      }
+    });
+
+    delete req.ext.prebid;
+  }
+
+  if (feedbackArray.length) {
+    deepSetValue(req, 'ext.bid_feedback', feedbackArray[0]);
+    feedbackArray.shift();
+  }
+
+  return req;
+}
+
 export const storage = getStorageManager({ bidderCode: BIDDER_CODE });
 
 export const spec = {
@@ -156,7 +153,7 @@ export const spec = {
       requests.push({
         data,
         method: 'POST',
-        url: 'https://ssb-global.smartadserver.com/api/bid?callerId=169',
+        url: 'https://ssb-global.smartadserver.com/api/bid?callerId=169'
       })
     });
 
@@ -177,7 +174,12 @@ export const spec = {
       serverResponse.body.seatbid
         .filter(seat => seat?.bid?.length)
         .forEach(seat =>
-          seat.bid.forEach(bid => bid.impid = impIdMap[bid.impid])
+          seat.bid.forEach(bid => {
+            bid.impid = impIdMap[bid.impid];
+            if (deepAccess(bid, 'ext.feedback_token')) {
+              tokens[bid.impid] = bid.ext.feedback_token;
+            }
+          })
         );
     }
 
@@ -309,7 +311,7 @@ export const converter = ortbConverter({
       });
     });
 
-    const req = buildRequest(splitImps, bidderRequest, context);
+    let req = buildRequest(splitImps, bidderRequest, context);
 
     let env = ['ortb2.site.publisher', 'ortb2.app.publisher', 'ortb2.dooh.publisher'].find(propPath => deepAccess(bid, propPath)) || 'ortb2.site.publisher';
     nwid = deepAccess(bid, env + '.id') || bid.params.networkId;
@@ -323,7 +325,7 @@ export const converter = ortbConverter({
       if (deepAccess(bid, path)) {
         props.forEach(prop => {
           if (!deepAccess(bid, `${path}.${prop}`)) {
-            logWarn(`${LOG_PREFIX} Property "${path}.${prop}" is missing from request.  Request will proceed, but the use of "${prop}" is strongly encouraged.`, bid);
+            logWarn(`${LOG_PREFIX} Property "${path}.${prop}" is missing from request. Request will proceed, but the use of "${prop}" is strongly encouraged.`, bid);
           }
         });
       }
@@ -333,6 +335,8 @@ export const converter = ortbConverter({
     if (pid) {
       deepSetValue(req, 'user.buyeruid', pid);
     }
+
+    req = updateFeedbackData(req);
 
     return req;
   }
